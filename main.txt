@@ -1,0 +1,289 @@
+import subprocess
+import sys
+import time
+import os
+import fake_useragent
+import requests
+import psutil
+import undetected_chromedriver
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common import TimeoutException
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium_recaptcha_solver import RecaptchaSolver, RecaptchaException
+
+
+def get_arguments():
+    arguments = sys.argv.copy()
+    arguments.pop(0)
+
+    arguments_array = arguments
+    arguments = " ".join(arguments)
+
+    if getattr(sys, "frozen", False):
+        file_path = sys.executable
+    else:
+        file_path = os.path.realpath(__file__)
+
+    root_folder = file_path.split("\\")
+    root_folder.pop(-1)
+    root_folder = "\\".join(root_folder)
+
+    use_phone_number = arguments_array[0] == "P"
+
+    show_window = arguments_array[1] == "T"
+
+    start_changeip = arguments_array[2] == "T"
+
+    proxy_exist = arguments_array[3] != "null"
+    proxy = ""
+    if proxy_exist:
+        proxy = arguments_array[3]
+
+    contact_info = arguments_array[4]
+
+    password = arguments_array[5]
+
+    country_code = arguments_array[6]
+
+    wait_element_timeout = arguments_array[7].split(";")[0]
+    wait_error_element_timeout = arguments_array[7].split(";")[1]
+    click_element_timeout = int(arguments_array[7].split(";")[2])
+    page_load_timeout = int(arguments_array[7].split(";")[3])
+    before_error_wait_timeout = int(arguments_array[7].split(";")[4])
+
+    changeip_arg = arguments_array[8]
+
+    SMS_timeout = 0
+    API_URL = ""
+    API_key = ""
+    country_SMS_prefix = ""
+    phone_id = ""
+    if use_phone_number:
+        SMS_timeout = int(arguments_array[9])
+        API_URL = arguments_array[10]
+        API_key = arguments_array[11]
+        country_SMS_prefix = arguments_array[12]
+        phone_id = arguments_array[13]
+
+    started_before = "started_before" in arguments_array[-1]
+
+    return arguments, file_path, root_folder, use_phone_number, show_window, start_changeip, proxy_exist, proxy, contact_info, password, country_code, wait_element_timeout, wait_error_element_timeout, click_element_timeout, page_load_timeout, before_error_wait_timeout, changeip_arg, SMS_timeout, API_URL, API_key, country_SMS_prefix, phone_id, started_before
+
+def get_browser_options():
+    options = Options()
+
+    if not show_window:
+        options.add_argument("--headless")
+    if proxy_exist:
+        options.add_argument(f'--proxy-server={proxy}')
+    options.add_argument(f"--user-agent={fake_useragent.UserAgent(use_external_data=True)}")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--blink-settings=imagesEnabled=false")
+
+    return options
+
+def kill_chrome():
+    for process in psutil.process_iter():
+        if process.name() == "chrome.exe":
+            try:
+                process.kill()
+            except:
+                pass
+
+def wait_change_ip():
+    while True:
+        for process in psutil.process_iter():
+            if process.name() == "changeip.exe":
+                process_exist = True
+                break
+            else:
+                process_exist = False
+        if not process_exist:
+            break
+
+def throw(message):
+    if " - " in message:
+        with open("errors.txt", "a") as file:
+            file.write(message + "\n")
+        print(message)
+
+        if (not ("Не удалось пройти капчу." in message)) and (not ("OLX отклонил запрос на регистрацию из-за подозрительной активности с этого ip адреса." in message)):
+            return
+
+        if start_changeip:
+            subprocess.run(f'"{root_folder}\\changeip.exe" {changeip_arg}', shell=True)
+
+        if started_before:
+            subprocess.run(f'"{file_path}" {arguments}', shell=True)
+        else:
+            subprocess.run(f'"{file_path}" {arguments} started_before', shell=True)
+    else:
+        with open("created.txt", "a") as file:
+            file.write(message + "\n")
+
+def get_confirmation_code():
+    start_time = time.time()
+    while True:
+        try:
+            confirmation_code_requests = requests.get(
+                f"{API_URL}/stubs/handler_api.php?api_key={API_key}&action=getStatus&id={phone_id}",
+                proxies={"http": f"socks5h://SutRaGRc8:jTGNKyFz@fra.socks.ipvanish.com:1080",
+                         "https": f"socks5h://SutRaGRc8:jTGNKyFz@fra.socks.ipvanish.com:1080"}).text
+        except:
+            continue
+
+        if confirmation_code_requests == "STATUS_CANCEL":
+            throw(f"{contact_info}:{password} - Время при получении SMS вышло.")
+            return "null"
+        elif confirmation_code_requests == "BAD_KEY":
+            throw(f"{contact_info}:{password} - Неверный API ключь.")
+            return "null"
+
+        try:
+            confirmation_code = str(int(confirmation_code_requests.split(":")[1]))
+
+            if len(confirmation_code.replace(" ", "")) < 6:
+                return "0" + confirmation_code
+
+            return confirmation_code
+        except:
+            pass
+
+        if (time.time() - start_time) >= SMS_timeout:
+            throw(f"{contact_info}:{password} - Время при получении SMS вышло.")
+            return "null"
+
+
+def click_button(driver, CSS_id):
+    button = WebDriverWait(driver, wait_element_timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, CSS_id)))
+    time.sleep(click_element_timeout)
+    button.click()
+
+def wait_element(driver, CSS_id):
+    WebDriverWait(driver, wait_element_timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, CSS_id)))
+
+def write_text(driver, CSS_id, text):
+    WebDriverWait(driver, wait_element_timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, CSS_id))).send_keys(text)
+
+
+def start_browser():
+    kill_chrome()
+
+    options = get_browser_options()
+    chrome_path = ChromeDriverManager().install()
+
+    try:
+        driver = undetected_chromedriver.Chrome(options=options, driver_executable_path=chrome_path)
+        if started_before:
+            if start_changeip:
+                wait_change_ip()
+
+            time.sleep(before_error_wait_timeout)
+
+        driver.get(f"http://www.olx.{country_code}/account/?ref[0][params][url]=http%3A%2F%2Fwww.olx.{country_code}%2F&ref[0][action]=redirector&ref[0][method]=index")
+        time.sleep(page_load_timeout)
+
+        try:
+            click_button(driver, ".fc-button.fc-cta-consent.fc-primary-button") # Соглашаюсь
+        except:
+            pass
+
+        click_button(driver, ".css-vz18bh") # Зареєструватися
+
+        wait_element(driver, ".css-1lqoiqx")
+
+        write_text(driver, ".css-2os53m", contact_info) # Електронна пошта чи телефон
+        write_text(driver, ".css-1kzly1g", password) # Пароль
+
+        click_button(driver, ".css-1di05q6") # Зареєструватися
+
+        try:
+            WebDriverWait(driver, wait_error_element_timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".css-9pgvpt")))
+
+            throw(f"{contact_info}:{password} - OLX отклонил запрос на регистрацию из-за подозрительной активности с этого ip адреса.")
+            driver.quit()
+            return
+        except:
+            pass
+
+        try:
+            WebDriverWait(driver, wait_error_element_timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".css-nklc69")))
+
+            throw(f"{contact_info}:{password} - Номер или email уже занят.")
+            driver.quit()
+            return
+        except:
+            pass
+
+        captcha_passed = False
+        try:
+            WebDriverWait(driver, wait_error_element_timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".css-1fx6pz9")))
+            captcha_passed = True
+        except:
+            pass
+
+        if not captcha_passed:
+            try:
+                WebDriverWait(driver, wait_element_timeout).until(EC.visibility_of_element_located((By.XPATH, '//iframe[@title="reCAPTCHA"]')))
+                try:
+                    RecaptchaSolver(driver=driver).click_recaptcha_v2(iframe=driver.find_element(By.XPATH, '//iframe[@title="reCAPTCHA"]')) # Я не робот
+                except TimeoutException:
+                    pass
+            except RecaptchaException:
+                throw(f"{contact_info}:{password} - Не удалось пройти капчу.")
+                driver.quit()
+                return
+
+        if not use_phone_number:
+            wait_element(driver, ".css-1fx6pz9")
+            time.sleep(click_element_timeout)
+            throw(f"{contact_info}:{password}")
+            driver.quit()
+            return
+
+        click_button(driver, ".css-1fx6pz9") # Уведіть код підтвердження
+
+        confirmation_code = get_confirmation_code()
+        if confirmation_code == "null":
+            driver.quit()
+            return
+
+        wait_element(driver, ".css-akt2at")
+
+        write_text(driver, ".css-2os53m", confirmation_code) # Код підтвердження
+
+        click_button(driver, ".css-43dgnu") # Підтвердити код
+
+        wait_element(driver, ".css-1fx6pz9")
+        time.sleep(click_element_timeout)
+        throw(f"{contact_info}:{password}")
+        driver.quit()
+        return
+    except TimeoutException:
+        throw(f"{contact_info}:{password} - Элемент не найден.")
+        driver.quit()
+        return
+    except Exception as error:
+        throw(f"{contact_info}:{password} - {error}.")
+        driver.quit()
+        return
+
+
+def main():
+    global arguments, file_path, root_folder, use_phone_number, show_window, start_changeip, proxy_exist, proxy, contact_info, password, country_code, wait_element_timeout, wait_error_element_timeout, click_element_timeout, page_load_timeout, before_error_wait_timeout, changeip_arg, SMS_timeout, API_URL, API_key, country_SMS_prefix, phone_id, started_before
+    arguments, file_path, root_folder, use_phone_number, show_window, start_changeip, proxy_exist, proxy, contact_info, password, country_code, wait_element_timeout, wait_error_element_timeout, click_element_timeout, page_load_timeout, before_error_wait_timeout, changeip_arg, SMS_timeout, API_URL, API_key, country_SMS_prefix, phone_id, started_before = get_arguments()
+
+    start_browser()
+
+if __name__ == "__main__":
+    main()
+
+# Формат:
+#   main.exe "Использовать регистрацию по email(E) или по номеру(P)" "Показывать ли окно браузера (T/F)?" "Запускать ли changeip.exe (T/F)?" "Прокси http/https, если нету то null" "Номер телефона или email" "Пароль" "Код страны" "Макс. время ожидания элемента";"Макс. время ожидания элемента ошибки";"Сколько ждать после загрузи элемента кнопки, для того чтоб нажать на нее?";"Сколько ждать после загрузки страницы?";"Сколько ждать если в прошлый раз была ошибка?" "Аргумент для changeip.exe"
+#   main.exe "Использовать регистрацию по email(E) или по номеру(P)" "Показывать ли окно браузера (T/F)?" "Запускать ли changeip.exe (T/F)?" "Прокси http/https, если нету то null" "Номер телефона или email" "Пароль" "Код страны" "Макс. время ожидания элемента";"Макс. время ожидания элемента ошибки";"Сколько ждать после загрузи элемента кнопки, для того чтоб нажать на нее?";"Сколько ждать после загрузки страницы?";"Сколько ждать если в прошлый раз была ошибка?" "Аргумент для changeip.exe" "Макс. время ожидания SMS" "URL API для получения кода смс" "API ключ" "ID номера телефона"
+# Пример:
+#   main.exe E T F null Jitso2f@gmail.com 74vh7zjLK3M3RLt uz 20;7;4;15;40 Antinity
+#   main.exe P F T 217.23.8.166:45985 954871972 6cU8z4sECfVR59v ua 15;5;6;10;50 Antinity 180 https://www.smshub.org 191188U810d3fb7b7e60815300fcd2a6b0ac1cf +380 176710
